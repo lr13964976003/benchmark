@@ -240,8 +240,24 @@ def replay(device="npu:0", dryrun=False):
         if name == "aten::view":
             x = fetch_input(0)
             target = ivals[1] if len(ivals) > 1 and isinstance(ivals[1], list) else [-1]
-            target = [int(v) for v in target]
-            out = x.view(*target)
+            target = [int(v) for v in target if isinstance(v, int)] or [-1]
+            try:
+                out = x.view(*target)
+            except RuntimeError:
+                # execution trace 的 shape 在回放中可能不满足元素个数约束，进行鲁棒回退
+                oshape = op.get("output_shapes", [])
+                fallback_shape = oshape[0] if oshape and isinstance(oshape[0], list) else None
+                if fallback_shape and all(isinstance(d, int) and d > 0 for d in fallback_shape):
+                    need = 1
+                    for d in fallback_shape:
+                        need *= d
+                    flat = x.reshape(-1)
+                    if flat.numel() < need:
+                        pad = torch.zeros(need - flat.numel(), dtype=flat.dtype, device=flat.device)
+                        flat = torch.cat([flat, pad], dim=0)
+                    out = flat[:need].view(*fallback_shape)
+                else:
+                    out = x.reshape(-1)
         elif name == "aten::to":
             x = fetch_input(0)
             out = x.to(device)
